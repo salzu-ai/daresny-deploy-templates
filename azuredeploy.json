@@ -1,0 +1,184 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.49.2.45890",
+      "templateHash": "16158852819239214893"
+    }
+  },
+  "parameters": {
+    "assignmentKind": {
+      "type": "string",
+      "defaultValue": "active",
+      "allowedValues": [
+        "active",
+        "eligible"
+      ],
+      "metadata": {
+        "description": "active = on now, remove it the same day. eligible = needs Entra ID P2; activate in PIM; ends after 30 days."
+      }
+    },
+    "now": {
+      "type": "string",
+      "defaultValue": "[utcNow()]",
+      "metadata": {
+        "description": "Leave the default (start time of an eligible assignment)."
+      }
+    }
+  },
+  "variables": {
+    "product": "daresny",
+    "env": "dev",
+    "regionCode": "uaen",
+    "devSubscriptionId": "349e04f2-e941-4feb-a99d-03fc3f387104",
+    "payVaultPrefix": "[format('kv-{0}-pay-{1}-', variables('product'), variables('env'))]",
+    "rgName": "[format('rg-{0}-ops-{1}-{2}-01', variables('product'), variables('env'), variables('regionCode'))]",
+    "suffix": "[take(uniqueString(subscription().id, variables('product'), variables('env')), 5)]",
+    "payVaultName": "[take(format('{0}{1}', variables('payVaultPrefix'), variables('suffix')), 24)]",
+    "eligibleDuration": "P30D",
+    "onDev": "[if(equals(subscription().subscriptionId, variables('devSubscriptionId')), true(), fail('Refused: this template runs only in the Daresny Dev subscription.'))]",
+    "vaultOk": "[if(startsWith(variables('payVaultName'), variables('payVaultPrefix')), true(), fail('Refused: the vault is not the Dev pay vault.'))]",
+    "guardOk": "[and(variables('onDev'), variables('vaultOk'))]"
+  },
+  "resources": [
+    {
+      "condition": "[variables('guardOk')]",
+      "type": "Microsoft.Authorization/roleDefinitions",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(subscription().id, 'daresny-pay-secret-writer', variables('env'))]",
+      "properties": {
+        "roleName": "[format('Daresny pay secret writer ({0})', variables('env'))]",
+        "description": "Create secrets and read secret metadata in the Daresny Dev pay vault. Cannot read secret values (ADR-0009 §2.4).",
+        "type": "CustomRole",
+        "permissions": [
+          {
+            "actions": [],
+            "notActions": [],
+            "dataActions": [
+              "Microsoft.KeyVault/vaults/secrets/setSecret/action",
+              "Microsoft.KeyVault/vaults/secrets/readMetadata/action"
+            ],
+            "notDataActions": []
+          }
+        ],
+        "assignableScopes": [
+          "[subscriptionResourceId(variables('devSubscriptionId'), 'Microsoft.Resources/resourceGroups', variables('rgName'))]"
+        ]
+      }
+    },
+    {
+      "condition": "[variables('guardOk')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "pay-secret-writer-assign",
+      "resourceGroup": "[variables('rgName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "payVaultName": {
+            "value": "[variables('payVaultName')]"
+          },
+          "roleDefinitionId": {
+            "value": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, 'daresny-pay-secret-writer', variables('env')))]"
+          },
+          "writerPrincipalId": {
+            "value": "[deployer().objectId]"
+          },
+          "assignmentKind": {
+            "value": "[parameters('assignmentKind')]"
+          },
+          "eligibleDuration": {
+            "value": "[variables('eligibleDuration')]"
+          },
+          "now": {
+            "value": "[parameters('now')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.49.2.45890",
+              "templateHash": "645032421513475975"
+            }
+          },
+          "parameters": {
+            "payVaultName": {
+              "type": "string"
+            },
+            "roleDefinitionId": {
+              "type": "string"
+            },
+            "writerPrincipalId": {
+              "type": "string"
+            },
+            "assignmentKind": {
+              "type": "string"
+            },
+            "eligibleDuration": {
+              "type": "string"
+            },
+            "now": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "condition": "[equals(parameters('assignmentKind'), 'active')]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('payVaultName'))]",
+              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('payVaultName')), parameters('writerPrincipalId'), parameters('roleDefinitionId'))]",
+              "properties": {
+                "roleDefinitionId": "[parameters('roleDefinitionId')]",
+                "principalId": "[parameters('writerPrincipalId')]",
+                "principalType": "User",
+                "description": "Standing write-only access to store Dev payment secrets from the portal (ADR-0009 §2.4). Remove the same day."
+              }
+            },
+            {
+              "condition": "[equals(parameters('assignmentKind'), 'eligible')]",
+              "type": "Microsoft.Authorization/roleEligibilityScheduleRequests",
+              "apiVersion": "2022-04-01-preview",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('payVaultName'))]",
+              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('payVaultName')), parameters('writerPrincipalId'), parameters('roleDefinitionId'), 'eligible', parameters('now'))]",
+              "properties": {
+                "principalId": "[parameters('writerPrincipalId')]",
+                "roleDefinitionId": "[parameters('roleDefinitionId')]",
+                "requestType": "AdminAssign",
+                "justification": "Store Dev payment secrets from the portal, write-only (ADR-0009 §2.4).",
+                "scheduleInfo": {
+                  "startDateTime": "[parameters('now')]",
+                  "expiration": {
+                    "type": "AfterDuration",
+                    "duration": "[parameters('eligibleDuration')]"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, 'daresny-pay-secret-writer', variables('env')))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "payVaultName": {
+      "type": "string",
+      "value": "[variables('payVaultName')]"
+    },
+    "assignmentKind": {
+      "type": "string",
+      "value": "[parameters('assignmentKind')]"
+    }
+  }
+}
